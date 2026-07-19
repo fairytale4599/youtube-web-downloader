@@ -4,37 +4,34 @@ import cors from 'cors';
 import { YtDlp } from 'ytdlp-nodejs';
 import path from 'path';
 import fs from 'fs';
-import { randomUUID } from 'crypto';
 
 const app = express();
 const PORT = 3000;
-
 const ytdlp = new YtDlp();
 
 app.use(cors());
 app.use(express.json());
 
 const TMP_DIR = path.join(process.cwd(), 'tmp');
-if (!fs.existsSync(TMP_DIR)) {
-  fs.mkdirSync(TMP_DIR);
-}
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
 app.post('/api/search', async (req: Request, res: Response): Promise<void> => {
   const { query, pageToken, apiKey } = req.body;
-
-  if (!apiKey) {
-    res.status(400).json({ error: 'API key is required.' });
-    return;
+  const baseUrl = 'https://www.googleapis.com/youtube/v3/search';
+  let url = `${baseUrl}?part=snippet&maxResults=15&q=${encodeURIComponent(query)}&type=video&key=${apiKey}`;
+  
+  if (pageToken) {
+    url += `&pageToken=${pageToken}`;
   }
-
-  let url = `https://googleapis.com{encodeURIComponent(query)}&type=video&key=${apiKey}`;
-  if (pageToken) url += `&pageToken=${pageToken}`;
-
+  
   try {
     const response = await fetch(url);
-    if (!response.ok) throw new Error(`Error: ${response.statusText}`);
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error?.message || 'YouTube API error');
+    }
     
-    const data = await response.json();
+    const data = await response.json() as any;
     res.json({
       items: data.items || [],
       nextPageToken: data.nextPageToken,
@@ -47,72 +44,52 @@ app.post('/api/search', async (req: Request, res: Response): Promise<void> => {
 });
 
 app.post('/api/download', async (req: Request, res: Response): Promise<void> => {
-  const { videoUrl } = req.body;
-
-  if (!videoUrl) {
-    res.status(400).json({ error: 'YouTube URL is required.' });
-    return;
-  }
-
-  const outputTemplate = path.join(TMP_DIR, '%(title)s.%(ext)s');
-
-  function findFirstFile(dir: string): string | null {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-
-      if (entry.isFile()) {
-        return fullPath;
-      }
-
-      if (entry.isDirectory()) {
-        const found = findFirstFile(fullPath);
-        if (found) {
-          return found;
-        }
-      }
-    }
-
-    return null;
-  }
+  const { videoUrl, quality, format } = req.body;
+  const fileName = `vid_${Date.now()}.${format || 'mp4'}`;
+  const fullPath = path.join(TMP_DIR, fileName);
 
   try {
-    console.log('Starting download:', videoUrl);
-
     await ytdlp
       .download(videoUrl)
-      .output(outputTemplate)
-      .filter('mergevideo')
-      .quality('1080p')
-      .type('mp4')
-      .on('progress', (p) => {
-        console.log(`Progress: ${p.percentage_str}`);
-      })
+      .format(format === 'mp3' ? 'bestaudio' : format)
+      .output(fullPath)
       .run();
 
-    const fullFilePath = findFirstFile(TMP_DIR);
-
-    if (!fullFilePath) {
-      throw new Error('No downloaded file found.');
-    }
-
-    const targetFile = path.basename(fullFilePath);
-
-    console.log('Found downloaded file:', fullFilePath);
-
-    res.json({
-      success: true,
-      file: targetFile,
-      path: fullFilePath,
-    });
-
+    /*res.download(fullPath, `download.${format || 'mp4'}`, (err) => {
+      if (err) {
+        console.error('Download transfer error:', err);
+      } else {
+        console.log('File successfully sent to user.');
+      }
+    });*/
   } catch (error) {
-    console.error('Download failed:', error);
+    console.error('Download process failed:', error);
+    res.status(500).json({ error: 'Download failed' });
+  }
+});
 
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Download failed' });
+app.post('/api/info', async (req: Request, res: Response): Promise<void> => {
+  const { videoUrl } = req.body;
+  
+  try {
+    const rawData = await ytdlp.getFormatsAsync(videoUrl);
+    const formats = Array.isArray(rawData) ? rawData : (rawData as any).formats || [];
+
+    if (!Array.isArray(formats) || formats.length === 0) {
+      throw new Error("No formats found for this video");
     }
+
+    const videoFormats = [...new Set(formats.map((f: any) => f.ext))];
+    const videoQuality = [...new Set(
+      formats
+        .filter((f: any) => f.vcodec !== 'none' && f.height)
+        .map((f: any) => `${f.height}p`)
+    )].sort((a: any, b: any) => parseInt(b) - parseInt(a));
+
+    res.json({ videoFormats, videoQuality });
+  } catch (error: any) {
+    console.error('FULL ERROR FROM YTDLP:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to fetch video info' });
   }
 });
 
