@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { deleteKey } from '../server/cookies.js';
 
 interface SearchDivProps {
   onSearch: (data: string, isSearchQuery: boolean) => void;
@@ -65,6 +66,11 @@ export default function SearchDiv({ onSearch }: SearchDivProps) {
                     Search
                 </button>
             </form>
+            <div className="w-full justify-right">
+                <p className="text-xs text-gray-500 mt-2 text-right cursor-pointer" onClick={() => {deleteKey(); window.location.reload(false);}}>
+                    Reset key
+                </p>
+            </div>
         </div>
     )
 }

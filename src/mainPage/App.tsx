@@ -48,28 +48,37 @@ export default function App() {
   const fetchPage = async (query: string, token = '') => {
     setIsLoading(true);
 
-    const data = await searchYouTubeVideos(query, token);
+    try {
+      const data = await searchYouTubeVideos(query, token);
 
-    setIsLoading(false);
-
-    if (data.items.length) {
-      setSearchResults(data.items);
-      setNextPageToken(data.nextPageToken);
-      setPrevPageToken(data.prevPageToken);
-      setActiveVideo(null);
-    } else {
-      alert('No videos found.');
-      if (!token) setSearchResults([]);
+      if (data?.items?.length) {
+        setSearchResults(data.items);
+        setNextPageToken(data.nextPageToken);
+        setPrevPageToken(data.prevPageToken);
+        setActiveVideo(null);
+      } else {
+        alert('No videos found.');
+        if (!token) setSearchResults([]);
+      }
+    } catch (error) {
+      console.error('Error fetching videos:', error);
+      alert('Failed to search videos. Please check your API key and connection.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleDownloadVideo = async (
-    e: React.MouseEvent,
-    videoId: string,
-    videoTitle: string
+    videoIdentifier: string,
+    videoTitle: string,
+    e?: React.MouseEvent
   ) => {
-    e.stopPropagation();
-    setDownloadingId(videoId);
+    if (e) e.stopPropagation();
+    setDownloadingId(videoIdentifier);
+
+    const finalUrl = videoIdentifier.startsWith('http')
+      ? videoIdentifier
+      : `https://youtube.com/watch?v=${videoIdentifier}`;
 
     try {
       const response = await fetch('http://localhost:3000/api/download', {
@@ -78,7 +87,7 @@ export default function App() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          videoUrl: `https://youtube.com/watch?v=${videoId}`,
+          videoUrl: finalUrl,
         }),
       });
 
@@ -138,9 +147,10 @@ export default function App() {
         <VideoEmbed
           videoSource={activeVideo}
           onBack={handleBackToResults}
+          onDownload={() => handleDownloadVideo(activeVideo, 'video')}
         />
       ) : searchResults.length ? (
-        <div className="bg-zinc-100 p-6 rounded shadow-lg w-96 flex flex-col items-center max-h-[85vh]">
+        <div className="bg-zinc-100 p-6 rounded shadow-lg min-w-96 flex flex-col items-center max-h-[85vh]">
           <h1 className="text-2xl font-bold mb-4 text-slate-900">
             Search Results
           </h1>
@@ -179,9 +189,9 @@ export default function App() {
                     disabled={downloadingId !== null}
                     onClick={(e) =>
                       handleDownloadVideo(
-                        e,
                         videoId,
-                        video.snippet?.title ?? 'video'
+                        video.snippet?.title ?? 'video',
+                        e
                       )
                     }
                     className={`p-2 rounded ${
