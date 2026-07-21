@@ -4,6 +4,10 @@ import cors from 'cors';
 import { YtDlp } from 'ytdlp-nodejs';
 import path from 'path';
 import fs from 'fs';
+import { exec } from 'child_process';
+import util from 'util';
+
+const execPromise = util.promisify(exec);
 
 const app = express();
 const PORT = 3000;
@@ -43,31 +47,6 @@ app.post('/api/search', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.post('/api/download', async (req: Request, res: Response): Promise<void> => {
-  const { videoUrl, quality, format } = req.body;
-  const fileName = `vid_${Date.now()}.${format || 'mp4'}`;
-  const fullPath = path.join(TMP_DIR, fileName);
-
-  try {
-    await ytdlp
-      .download(videoUrl)
-      .format(format === 'mp3' ? 'bestaudio' : format)
-      .output(fullPath)
-      .run();
-
-    /*res.download(fullPath, `download.${format || 'mp4'}`, (err) => {
-      if (err) {
-        console.error('Download transfer error:', err);
-      } else {
-        console.log('File successfully sent to user.');
-      }
-    });*/
-  } catch (error) {
-    console.error('Download process failed:', error);
-    res.status(500).json({ error: 'Download failed' });
-  }
-});
-
 app.post('/api/info', async (req: Request, res: Response): Promise<void> => {
   const { videoUrl } = req.body;
   
@@ -79,17 +58,99 @@ app.post('/api/info', async (req: Request, res: Response): Promise<void> => {
       throw new Error("No formats found for this video");
     }
 
-    const videoFormats = [...new Set(formats.map((f: any) => f.ext))];
-    const videoQuality = [...new Set(
-      formats
-        .filter((f: any) => f.vcodec !== 'none' && f.height)
-        .map((f: any) => `${f.height}p`)
-    )].sort((a: any, b: any) => parseInt(b) - parseInt(a));
+    const options: any[] = [];
+    const seenQualities = new Set();
 
-    res.json({ videoFormats, videoQuality });
+    formats.forEach((f: any) => {
+      if (f.vcodec !== 'none' && f.acodec === 'none' && f.height) {
+        const quality = `${f.height}p`;
+        if (!seenQualities.has(quality)) {
+          seenQualities.add(quality);
+          options.push({ filter: 'videoonly', type: f.ext || 'mp4', quality: quality });
+        }
+      }
+    });
+
+    options.push({ filter: 'audioonly', type: 'mp3', quality: 5 });
+
+    const seenMergedQualities = new Set();
+    formats.forEach((f: any) => {
+      if (f.vcodec !== 'none' && f.acodec !== 'none' && f.height) {
+        const quality = `${f.height}p`;
+        if (!seenMergedQualities.has(quality)) {
+          seenMergedQualities.add(quality);
+          options.push({ filter: 'audioandvideo', type: f.ext || 'mp4', quality: quality });
+        }
+      }
+    });
+
+    options.push({ filter: 'audioandvideo', type: 'mp4', quality: 'highest' });
+
+    const seenMergeQualities = new Set();
+    formats.forEach((f: any) => {
+      if (f.vcodec !== 'none' && f.height) {
+        const quality = `${f.height}p`;
+        if (!seenMergeQualities.has(quality)) {
+          seenMergeQualities.add(quality);
+          options.push({ filter: 'mergevideo', type: f.ext || 'mp4', quality: quality });
+        }
+      }
+    });
+
+    res.json({ options });
   } catch (error: any) {
     console.error('FULL ERROR FROM YTDLP:', error.message);
     res.status(500).json({ error: error.message || 'Failed to fetch video info' });
+  }
+});
+
+app.post('/api/download', async (req: Request, res: Response): Promise<void> => {
+  const { videoUrl, filter, type, quality } = req.body;
+  const ext = type || 'mp4';
+  const fileName = `vid_${Date.now()}.${ext}`;
+  const fullPath = path.join(TMP_DIR, fileName);
+
+  try {
+    let command = '';
+
+    switch (filter) {
+      case 'videoonly': {
+        const height = typeof quality === 'string' ? quality.replace('p', '') : '1080';
+        command = `yt-dlp --extractor-args "youtube:player_client=android,web" -f "bestvideo[height<=${height}]" --remux-video ${ext} -o "${fullPath}" "${videoUrl}"`;
+        break;
+      }
+      case 'audioonly': {
+        command = `yt-dlp --extractor-args "youtube:player_client=android,web" -x --audio-format mp3 -o "${fullPath}" "${videoUrl}"`;
+        break;
+      }
+      case 'audioandvideo': {
+        if (quality === 'highest') {
+          command = `yt-dlp --extractor-args "youtube:player_client=android,web" -f "bv*+ba/b" --remux-video ${ext} -o "${fullPath}" "${videoUrl}"`;
+        } else {
+          const height = typeof quality === 'string' ? quality.replace('p', '') : '1080';
+          command = `yt-dlp --extractor-args "youtube:player_client=android,web" -f "best[height<=${height}]" --remux-video ${ext} -o "${fullPath}" "${videoUrl}"`;
+        }
+        break;
+      }
+      case 'mergevideo': {
+        const height = typeof quality === 'string' ? quality.replace('p', '') : '1080';
+        command = `yt-dlp --extractor-args "youtube:player_client=android,web" -f "bestvideo[height<=${height}]+bestaudio/best[height<=${height}]" --remux-video ${ext} -o "${fullPath}" "${videoUrl}"`;
+        break;
+      }
+      default:
+        if (filter === 'audioonly' || type === 'mp3' || quality === 5) {
+          command = `yt-dlp --extractor-args "youtube:player_client=android,web" -x --audio-format mp3 -o "${fullPath}" "${videoUrl}"`;
+        } else {
+          command = `yt-dlp --extractor-args "youtube:player_client=android,web" -f "bv*+ba/b" --remux-video ${ext} -o "${fullPath}" "${videoUrl}"`;
+        }
+    }
+
+    await execPromise(command);
+
+    res.download(fullPath, `download.${ext}`);
+  } catch (error: any) {
+    console.error('Download process failed:', error.message);
+    res.status(500).json({ error: 'Download failed: ' + error.message });
   }
 });
 
